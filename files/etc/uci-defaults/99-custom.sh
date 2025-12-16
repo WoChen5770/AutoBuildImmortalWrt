@@ -1,9 +1,12 @@
 #!/bin/sh
 # 99-custom.sh 就是immortalwrt固件首次启动时运行的脚本 位于固件内的/etc/uci-defaults/99-custom.sh
 # Log file for debugging
-LOGFILE="/tmp/uci-defaults-log.txt"
+LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
-# 设置默认防火墙规则，方便虚拟机首次访问 WebUI
+# 设置默认防火墙规则，方便单网口虚拟机首次访问 WebUI
+# 因为本项目中 单网口模式是dhcp模式 直接就能上网并且访问web界面 避免新手每次都要修改/etc/config/network中的静态ip
+# 当你刷机运行后 都调整好了 你完全可以在web页面自行关闭 wan口防火墙的入站数据
+# 具体操作方法：网络——防火墙 在wan的入站数据 下拉选项里选择 拒绝 保存并应用即可。
 uci set firewall.@zone[1].input='ACCEPT'
 
 # 设置主机名映射，解决安卓原生 TV 无法联网的问题
@@ -31,7 +34,6 @@ for iface in /sys/class/net/*; do
         ifnames="$ifnames $iface_name"
     fi
 done
-# 删除多余空格
 ifnames=$(echo "$ifnames" | awk '{$1=$1};1')
 
 # 网络设置
@@ -64,39 +66,47 @@ elif [ "$count" -gt 1 ]; then
     if [ -z "$section" ]; then
         echo "error：cannot find device 'br-lan'." >>$LOGFILE
     else
-        # 删除原来的ports列表
+        # 删除原有ports
         uci -q delete "network.$section.ports"
-        # 添加新的ports列表
+        # 添加LAN接口端口
         for port in $lan_ifnames; do
             uci add_list "network.$section.ports"="$port"
         done
-        echo "ports of device 'br-lan' are update." >>$LOGFILE
+        echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
     fi
+
     # LAN口设置静态IP
     uci set network.lan.proto='static'
-    # 多网口设备 支持修改为别的ip地址,别的地址应该是网关地址，形如192.168.xx.1 项目说明里都强调过。
-    # 大家不能胡乱修改哦 比如有人修改为192.168.100.55 这是错误的理解 这个项目不能提前设置旁路地址
-    # 旁路的设置分2类情况,情况一是单网口的设备,默认是DHCP模式，ip应该在上一级路由器里查看。之后进入web页在设置旁路。
-    # 情况二旁路由如果是多网口设备，也应当用网关访问网页后，在自行在web网页里设置。总之大家不能直接在代码里修改旁路网关。千万不要徒增bug啦。
-    uci set network.lan.ipaddr='192.168.123.1'
+    # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可
     uci set network.lan.netmask='255.255.255.0'
-    echo "set 192.168.123.1 at $(date)" >>$LOGFILE
-    # 判断是否启用 PPPoE
-    echo "print enable_pppoe value=== $enable_pppoe" >>$LOGFILE
+    # 设置路由器管理后台地址
+    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+    if [ -f "$IP_VALUE_FILE" ]; then
+        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+        # 用户在UI上设置的路由器后台管理地址
+        uci set network.lan.ipaddr=$CUSTOM_IP
+        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+    else
+        uci set network.lan.ipaddr='192.168.123.1'
+        echo "default router ip is 192.168.123.1" >> $LOGFILE
+    fi
+
+    # PPPoE设置
+    echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
     if [ "$enable_pppoe" = "yes" ]; then
-        echo "PPPoE is enabled at $(date)" >>$LOGFILE
-        # 设置ipv4宽带拨号信息
+        echo "PPPoE enabled, configuring..." >>$LOGFILE
         uci set network.wan.proto='pppoe'
-        uci set network.wan.username=$pppoe_account
-        uci set network.wan.password=$pppoe_password
+        uci set network.wan.username="$pppoe_account"
+        uci set network.wan.password="$pppoe_password"
         uci set network.wan.peerdns='1'
         uci set network.wan.auto='1'
-        # 设置ipv6 默认不配置协议
         uci set network.wan6.proto='none'
-        echo "PPPoE configuration completed successfully." >>$LOGFILE
+        echo "PPPoE config done." >>$LOGFILE
     else
-        echo "PPPoE is not enabled. Skipping configuration." >>$LOGFILE
+        echo "PPPoE not enabled." >>$LOGFILE
     fi
+
+    uci commit network
 fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
@@ -159,5 +169,12 @@ uci commit
 FILE_PATH="/etc/openwrt_release"
 NEW_DESCRIPTION="Packaged by wukongdaily"
 sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
+
+# 若luci-app-advancedplus (进阶设置)已安装 则去除zsh的调用 防止命令行报 /usb/bin/zsh: not found的提示
+if opkg list-installed | grep -q '^luci-app-advancedplus '; then
+    sed -i '/\/usr\/bin\/zsh/d' /etc/profile
+    sed -i '/\/bin\/zsh/d' /etc/init.d/advancedplus
+    sed -i '/\/usr\/bin\/zsh/d' /etc/init.d/advancedplus
+fi
 
 exit 0
